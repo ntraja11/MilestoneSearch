@@ -1,51 +1,86 @@
 ﻿using Microsoft.Extensions.AI;
 using UglyToad.PdfPig;
+using System.Collections.Concurrent;
 
 namespace MilestoneSearch.RAG;
 
 public class PdfIngestionService
 {
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
+    private const int SemaphoreCount = 40;
 
     public PdfIngestionService(IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator)
     {
         _embeddingGenerator = embeddingGenerator;
     }
 
-    public async Task<List<Topic>> ProcessPdfAsync(string pdfPath)
+    public async Task<IList<Topic>> ProcessPdfAsync(string pdfPath)
     {
-        var topics = new List<Topic>();
+        var topics = new ConcurrentBag<Topic>();
         var fileName = Path.GetFileName(pdfPath);
 
         using var document = PdfDocument.Open(pdfPath);
 
+        var semaphore = new SemaphoreSlim(SemaphoreCount);
+
+        var allChunks = new List<(int Page, string Chunk)>();
+
+        // First pass: collect all chunks
         foreach (var page in document.GetPages())
         {
             var text = page.Text;
-
             if (string.IsNullOrWhiteSpace(text))
                 continue;
 
             var chunks = ChunkText(text, maxChunkSize: 800);
 
             foreach (var chunk in chunks)
-            {
-                var embedding = await _embeddingGenerator.GenerateAsync(chunk);
-
-                var topic = new Topic
-                {
-                    Title = $"Page {page.Number} - {fileName}",
-                    Content = chunk,
-                    Source = $"{fileName} (Page {page.Number})",
-                    FileName = fileName,
-                    ContentEmbedding = embedding.Vector
-                };
-
-                topics.Add(topic);
-            }
+                allChunks.Add((page.Number, chunk));
         }
 
-        return topics;
+        int total = allChunks.Count;
+        int completed = 0;
+
+        Console.WriteLine($"Total chunks to embed: {total}");
+
+        // Second pass: embed in parallel
+        var tasks = allChunks.Select(async item =>
+        {
+            await semaphore.WaitAsync();
+            try
+            {
+                var embedding = await _embeddingGenerator.GenerateAsync(item.Chunk);
+
+                topics.Add(new Topic
+                {
+                    Title = $"Page {item.Page} - {fileName}",
+                    Content = item.Chunk,
+                    Source = $"{fileName} (Page {item.Page})",
+                    FileName = fileName,
+                    ContentEmbedding = embedding.Vector
+                });
+
+                // Thread-safe increment
+                int done = Interlocked.Increment(ref completed);
+
+                double percent = (double)done / total * 100;
+
+                char[] spinner = { '|', '/', '-', '\\' };
+                int spinIndex = done % spinner.Length;
+
+                Console.Write($"\r{spinner[spinIndex]} Progress: {done}/{total} ({percent:F1}%)");
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks);
+
+        Console.WriteLine("Embedding complete.");
+
+        return topics.ToList();
     }
 
     private static List<string> ChunkText(string text, int maxChunkSize)

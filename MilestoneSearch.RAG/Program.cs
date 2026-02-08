@@ -15,7 +15,7 @@ internal class Program
         var ollamaEndpoint = new Uri("http://localhost:11434");
         var qdrantEndpoint = new Uri("http://localhost:6334");
 
-        const string chatModelId = "gemma2:2b";
+        const string chatModelId = "phi3:mini";
         const string embeddingModel = "nomic-embed-text";
         const string collectionName = "milestone_topics";
         const int searchLimit = 5;
@@ -65,7 +65,7 @@ internal class Program
                 continue;
             }
 
-            Console.WriteLine($"Processing {pdf}...");
+            Console.WriteLine($"Processing conversion for :: {pdf}...");
 
             var topicsToInsert = await ingestion.ProcessPdfAsync(pdf);
 
